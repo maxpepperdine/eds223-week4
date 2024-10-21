@@ -1,0 +1,350 @@
+---
+title: "EDS 223 Week 4 Lab"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Load packages
+
+```{r}
+install.packages("spDataLarge", repos = "https://nowosad.github.io/drat/", type = "source")
+```
+
+```{r}
+library(geodata)
+library(terra)
+library(tidyverse)
+library(tmap)
+library(kableExtra)
+library(spData)
+library(spDataLarge)
+```
+
+## Load data
+
+```{r}
+# create raster objects
+zion_elevation <- rast(system.file("raster/srtm.tif", package = "spDataLarge"))
+zion_land <- rast(system.file("raster/nlcd.tif", package = "spDataLarge"))
+
+# test class of raster object
+class(zion_elevation)
+
+# get summary information 
+summary(zion_elevation)
+zion_elevation
+```
+
+## Make some maps with `tmap`
+
+```{r}
+map1 <- tm_shape(zion_elevation) +
+  tm_raster(title = "Elevation (m)") +
+  tm_layout(legend.outside = TRUE)
+
+map2 <- tm_shape(zion_land) +
+  tm_raster(title = "Land cover") +
+  tm_layout(legend.outside = TRUE)
+
+tmap_arrange(map1, map2, nrow = 1)
+```
+
+## Load more data
+
+```{r}
+landsat <- rast(system.file("raster/landsat.tif", package = "spDataLarge"))
+
+nlyr(landsat) # test number of layers in raster object
+landsat # see general information
+```
+
+```{r}
+# create a map showing each of the 4 landsat layers 
+tm_shape(landsat) + 
+  tm_raster()
+```
+
+## Subsetting in a list of rasters
+
+```{r}
+landsat3 <- subset(landsat, "landsat_3")
+
+tm_shape(landsat3) + 
+  tm_raster()
+```
+
+## Global statistics 
+
+```{r}
+global(zion_elevation, mean) # take the mean of all pixel values
+freq(zion_land) # show each land cover type and their cell count
+```
+
+## Indexing datasets/objects 
+
+```{r}
+zion_elevation[1, 1] # get value of grid cell in first row & column
+zion_elevation[1] # cell value of first cell; same as above
+
+landsat[1] # this produces 4 values; in the first cell, there are 4 values
+```
+
+```{r}
+# index in a matrix & update its value
+zion_elevation [1, 1] <- 0
+zion_elevation[1, 1]
+
+landsat[1] <- 0 # this also gets applied to all layers in a list 
+landsat[1]
+```
+
+```{r}
+# if we thought certain values weren't accurate, we could subset to 
+# get rid of them 
+test_raster <- zion_elevation
+test_raster[test_raster < 20] <- NA
+```
+
+## Spatial subsetting
+
+#### Using coordinates
+
+```{r}
+point <- matrix(c(-113, 37.5), ncol = 2)
+
+# determine elevation value at the point (lat/lon) specified above 
+terra::extract(zion_elevation, point) 
+```
+
+#### Based on a defined extent 
+
+```{r}
+# create a raster with a smaller extent
+clip <- rast(xmin = -113.3, xmax = -113, ymin = 37.2, ymax = 37.9,
+            resolution = 0.3,
+            vals = 1)
+
+
+# select values that fall within smaller extent
+# need to specify 'drop = FALSE' b/c geometry column would get dropped 
+zion_elevation_clip <- zion_elevation[clip, drop = FALSE]
+
+
+# verify that output has fewer values than original
+if(ncell(zion_elevation) == nrow(zion_elevation_clip)) {
+  warning("clipping did not remove cells")
+} else {
+  print("clipping removed cells")
+}
+```
+
+###### Plot to QC it worked
+
+```{r}
+tm_shape(zion_elevation) +
+  tm_raster()
+
+tm_shape(zion_elevation_clip) +
+  tm_raster()
+
+# we can see visually that the clipped raster is smaller
+# But we can also check this quantitatively 
+if(ext(zion_elevation) == ext(zion_elevation_clip)){
+  print("extents match")
+} else{
+  print("extents do not match")
+}
+```
+
+#### Masking 
+
+```{r}
+# creating our mask 
+rmask <- zion_elevation
+rmask[rmask < 2000] <- NA # store NA values in all locations w/ elev < 2000
+
+# masking the elevation raster w/ bracket subsetting
+masked1 <- zion_elevation[rmask, drop = FALSE]
+
+# masking w/ the mask() function 
+masked2 <- terra::mask(zion_elevation, rmask) # raster to mask, mask raster
+```
+
+```{r}
+ # visual QC-ing
+tm_shape(zion_elevation) +
+  tm_raster()
+
+tm_shape(masked1) +
+  tm_raster()
+
+tm_shape(masked2) +
+  tm_raster()
+```
+
+## Map Algebra
+
+#### Simple math/logical operations
+
+```{r}
+# normal arithmetic 
+ex1 <- zion_elevation + zion_elevation # doubles each cells' value
+ex2 <- zion_elevation^2 # raises each cells' value to the power of 2
+
+# logical operations
+ex3 <- log(zion_elevation) # takes the log of each cells' value
+ex4 <- zion_elevation > 5 # determines whether each cell has a value > 5
+```
+
+#### Classify w/ matrices
+
+```{r}
+# create reclassification matrix
+rcl <- matrix(c(1000, 1500, 1, # group 1 ranges from 1000 - 1500 m
+                1500, 2000, 2, # group 2 ranges from 1500 - 2000 m
+                2000, 2500, 3, # group 3 ranges from 2000 - 2500 m
+                2500, 3000, 4), # group 4 ranges from 2500 - 3000 m
+                ncol = 3, byrow = TRUE)
+rcl
+
+# use reclassification matrix to reclassify elevation raster
+reclassified <- terra::classify(zion_elevation, rcl = rcl)
+
+# change reclassified values into factors
+values(reclassified) <- as.factor(values(reclassified))
+
+
+tm_shape(reclassified) + 
+  tm_raster()
+```
+
+#### Claculating NDVI
+
+```{r}
+# create a function to calc NDVI
+ndvi_fun <- function(nir, red) {
+  (nir - red)/(nir + red)
+}
+
+# apply NDVI function to Landsat bands 3 & 4
+ndvi_rast <- lapp(landsat[[c(4, 3)]], fun = ndvi_fun)
+
+
+# map it 
+tm_shape(ndvi_rast) + 
+  tm_raster(title = "NDVI")
+```
+
+#### Focal Opperations 
+
+- We can use the focal() function to perform spatial filtering
+
+- We define the size, shape, and weights of the moving window using a matrix. 
+
+- In the following example we’ll find the minimum value in 9x9 cell neighborhoods.
+
+```{r}
+elevation_focal <- focal(zion_elevation, 
+                         w = matrix(1, nrow = 9, ncol = 9), # make moving window
+                         fun = min) # function to map new values
+elevation_focal
+
+tm_shape(elevation_focal) + 
+  tm_raster()
+```
+
+#### Zonal Operations 
+
+```{r}
+# find the mean value in each reclassified groups
+zonal(zion_elevation, reclassified, fun = "mean") %>%
+  kable(col.names = c("Elevation zone", "Mean elevation (m)")) %>% 
+  kable_styling(bootstrap_options = "striped")
+
+
+# mean elevation across the entire park 
+terra::global(zion_elevation, mean)
+```
+
+## Geometry Operations
+
+1. Change extent 
+2. Change origin 
+3. Change resolution 
+
+#### Changing the extent
+
+```{r}
+extend <- terra::extend(zion_elevation, c(1, 200)) # add one row and two columns
+
+# will get an error because the extents don't match 
+zion_elevation + extend
+
+extend2 <- terra::extend(zion_elevation, extend)
+
+extend + extend2
+```
+
+#### Origin 
+
+```{r}
+# origin function returns the coordinates of the cell corner closest 
+# to the coordinates (0,0).
+origin(zion_elevation)
+```
+
+#### Changing resolution 
+
+```{r}
+# coarsen the resolution of the Zion elevation data by a factor of 5
+zion_elevation_coarse <-  aggregate(zion_elevation, 
+                                    fact = 5, # scale to aggregate
+                                    fun = mean)
+
+
+# make the resolution finer 
+zion_elevation_disagg <- disagg(zion_elevation_coarse, 
+                                fact = 5, 
+                                method = "bilinear")
+
+
+
+# check whether the disaggregated version matches the original
+if(identical(zion_elevation, zion_elevation_disagg)){
+  print("disaggregated data matches original")
+} else {
+  warning("disaggregated data does not match original")
+}
+```
+
+#### Resampling 
+
+```{r}
+# create new raster to resample to 
+target_raster <- rast(xmin = -113.2, xmax = -112.9, 
+                      ymin = 37.14, ymax = 37.5, 
+                      nrow = 450, ncol = 460, 
+                      crs = crs(zion_elevation))
+
+zion_elevation_resample <- resample(x = zion_elevation, # raster to resample 
+                                    y = target_raster,  # raster to resample to 
+                                    method = "bilinear")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
